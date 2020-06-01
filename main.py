@@ -8,13 +8,6 @@ import tensorflow as tf
 from tensorflow.keras import Sequential
 from tensorflow.keras import layers
 import matplotlib.pyplot as plt
-
-from keras.preprocessing.text import Tokenizer
-from keras.preprocessing.sequence import pad_sequences
-from keras.utils import to_categorical
-from keras.layers import Dense, Input, GlobalMaxPooling1D
-from keras.layers import Conv1D, MaxPooling1D, Embedding
-from keras.models import Model
 from keras.initializers import Constant
 
 
@@ -46,7 +39,8 @@ def get_midis_and_texts(instances, dataset_dir, instrument_indexes):
 
 def get_midi_vectors(midis, texts, instrument_indexes, mode):
     midi_vectors = []
-    for midi, text in zip(midis, texts):
+    for i, midi, text in zip(range(len(midis)), midis, texts):
+        print('%d/%d' % (i + 1, len(midis)))
         general_tempo = midi.estimate_tempo()
         general_chroma = midi.get_chroma()
         total_notes = sum(len(instrument.notes) for instrument in midi.instruments)
@@ -85,12 +79,13 @@ def get_vocabulary_and_word_embeddings(texts_train, texts_test, nlp):
     return word_indexes, np.array(word_embeddings), np.array(vocabulary)
 
 
-def get_train_and_test_sets(texts_train, texts_test, word_indexes, nlp):
+def get_train_and_test_sets(texts_train, texts_test, word_indexes, nlp, midi_vectors_train, midi_vectors_test):
     x_train, y_train, x_test, y_test = [], [], [], []
-    for x, y, texts in [[x_train, y_train, texts_train], [x_test, y_test, texts_test]]:
-        for text in texts:
+    for x, y, texts, midis in [[x_train, y_train, texts_train, midi_vectors_train],
+                        [x_test, y_test, texts_test, midi_vectors_test]]:
+        for text, midi in zip(texts, midis):
             text_word_indexes = [word_indexes[token.text] for token in nlp(text.strip())]
-            x.append(text_word_indexes[:-1])
+            x.append([text_word_indexes[:-1], midi])
             y.append(text_word_indexes[1:])
     return x_train, y_train, x_test, y_test
 
@@ -106,7 +101,7 @@ def get_train_and_val_data(x_train, y_train, val_split):
     return train_data, val_data
 
 
-def build_model(vocabulary_size, word_embeddings, layer_sizes):
+def build_model(vocabulary_size, word_embeddings, layer_sizes, midi_vector_size):
     model = Sequential(name='RNN')
     model.add(layers.Embedding(vocabulary_size, word_embeddings.shape[1], trainable=False,
                                embeddings_initializer=Constant(word_embeddings)))
@@ -127,16 +122,6 @@ def get_checkpoints_callback(checkpoint_dir):
 
 
 def generate_text(model, input_word, word_indexes, vocabulary, text_len, temperature=1.0):
-    """
-
-    :param model:
-    :param input_word:
-    :param word_indexes:
-    :param vocabulary:
-    :param text_len:
-    :param temperature: low values result -> predictable text, high values -> surprising text.
-    :return:
-    """
     current_word_index = tf.expand_dims([word_indexes[input_word]], 0)
     text_generated = []
     model.reset_states()
@@ -180,12 +165,19 @@ def write_to_file(history, generated_texts, layer_sizes, iteration):
             file.write("%s\n" % line)
 
 
+train_subset = 5  # for speeding up debugging
+
 mode = 'complete song'
 # mode = 'sliced song'
-dataset_dir = 'dataset'  # for pc
-# dataset_dir = 'DL3/dataset'  # for colab
+# dataset_dir = 'dataset'  # for pc
+dataset_dir = 'DL3/dataset'  # for colab
 instances_train = pd.read_csv('%s/lyrics_train_set.csv' % dataset_dir, header=None)
 instances_test = pd.read_csv('%s/lyrics_test_set.csv' % dataset_dir, header=None)
+
+if train_subset > 0:
+    instances_train = instances_train[:train_subset]
+    instances_test = instances_test[:train_subset]
+
 instrument_indexes = {}
 print('loading midis and texts...')
 midis_train, texts_train = get_midis_and_texts(instances_train, dataset_dir, instrument_indexes)
@@ -201,12 +193,13 @@ word_indexes, word_embeddings, vocabulary = get_vocabulary_and_word_embeddings(t
 
 print('building train and test sets...')
 val_split = 0.2
-x_train, y_train, x_test, y_test = get_train_and_test_sets(texts_train, texts_test, word_indexes, nlp)
+x_train, y_train, x_test, y_test = get_train_and_test_sets(texts_train, texts_test, word_indexes, nlp,
+                                                           midi_vectors_train, midi_vectors_test)
 train_data, val_data = get_train_and_val_data(x_train, y_train, val_split)
 
 # build model
 layer_sizes = [128]
-model = build_model(len(vocabulary), word_embeddings, layer_sizes)
+model = build_model(len(vocabulary), word_embeddings, layer_sizes, len(midi_vectors_train[0]))
 model.summary()
 checkpoint_dir = './training_checkpoints'
 checkpoint_callback = get_checkpoints_callback(checkpoint_dir)
