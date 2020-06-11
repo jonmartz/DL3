@@ -4,11 +4,18 @@ import numpy as np
 import pandas as pd
 import spacy
 import pretty_midi
-import tensorflow as tf
-from tensorflow.keras import Sequential
-from tensorflow.keras import layers
-import matplotlib.pyplot as plt
-from keras.initializers import Constant
+
+
+# import tensorflow as tf
+# from tensorflow.keras import Sequential
+# from tensorflow.keras import layers
+# import matplotlib.pyplot as plt
+
+# from keras.initializers import Constant
+# from keras.layers import LSTM, Dense, concatenate, Input, Embedding
+# from keras.models import Model
+# from keras.losses import CategoricalCrossentropy
+# from keras.callbacks import ModelCheckpoint
 
 
 def get_midis_and_texts(instances, dataset_dir, instrument_indexes):
@@ -23,10 +30,10 @@ def get_midis_and_texts(instances, dataset_dir, instrument_indexes):
         try:
             midi = pretty_midi.PrettyMIDI('%s/midi_files/%s' % (dataset_dir, filename))
             for instrument in midi.instruments:
-                if not instrument.is_drum:
-                    instrument_id = instrument.program
-                    if instrument_id not in instrument_indexes:
-                        instrument_indexes[instrument_id] = len(instrument_indexes)
+                # if not instrument.is_drum:
+                instrument_id = instrument.program
+                if instrument_id not in instrument_indexes:
+                    instrument_indexes[instrument_id] = len(instrument_indexes)
             midis.append(midi)
             texts.append(row[2])
         except:
@@ -37,34 +44,7 @@ def get_midis_and_texts(instances, dataset_dir, instrument_indexes):
     return midis, texts
 
 
-def get_midi_vectors(midis, texts, instrument_indexes, mode):
-    midi_vectors = []
-    for i, midi, text in zip(range(len(midis)), midis, texts):
-        print('%d/%d' % (i + 1, len(midis)))
-        general_tempo = midi.estimate_tempo()
-        general_chroma = midi.get_chroma()
-        total_notes = sum(len(instrument.notes) for instrument in midi.instruments)
-        instruments_presence = [0] * len(instrument_indexes)  # one entry per instrument
-        total_velocity = sum(sum(general_chroma))
-        general_semitones = [sum(semitone) / total_velocity for semitone in general_chroma]
-        instruments_semitones = [0] * (len(instrument_indexes) * 12)  # one entry per instrument per semitone
-        for instrument in midi.instruments:
-            if not instrument.is_drum:
-                instrument_index = instrument_indexes[instrument.program]  # instrument's index in the midi vector
-                instrument_presence = len(instrument.notes) / total_notes
-                instruments_presence[instrument_index] = instrument_presence
-                instrument_chroma = instrument.get_chroma()
-                total_velocity = sum(sum(instrument_chroma))
-                instrument_semitones = [sum(semitone) / total_velocity for semitone in instrument_chroma]
-                start_index = 12 * instrument_index  # jump to the instrument's semitones section in the midi vector
-                instruments_semitones[start_index: start_index + 12] = instrument_semitones
-        midi_vector = [general_tempo] + instruments_presence + general_semitones + instruments_semitones
-        midi_vectors.append(midi_vector)
-    return midi_vectors
-
-
 def get_vocabulary_and_word_embeddings(texts_train, texts_test, nlp):
-    # todo: maybe remove the '&' from all texts
     word_indexes = {}
     vocabulary, word_embeddings = [], []
     for texts in [texts_train, texts_test]:
@@ -79,149 +59,317 @@ def get_vocabulary_and_word_embeddings(texts_train, texts_test, nlp):
     return word_indexes, np.array(word_embeddings), np.array(vocabulary)
 
 
-def get_train_and_test_sets(texts_train, texts_test, word_indexes, nlp, midi_vectors_train, midi_vectors_test):
-    x_train, y_train, x_test, y_test = [], [], [], []
-    for x, y, texts, midis in [[x_train, y_train, texts_train, midi_vectors_train],
-                        [x_test, y_test, texts_test, midi_vectors_test]]:
-        for text, midi in zip(texts, midis):
-            text_word_indexes = [word_indexes[token.text] for token in nlp(text.strip())]
-            x.append([text_word_indexes[:-1], midi])
-            y.append(text_word_indexes[1:])
-    return x_train, y_train, x_test, y_test
+def get_midi_vectors(midis, instrument_indexes, num_phrases_by_song):
+    midi_vectors = []
+    midi_vectors_sliced = []
+    slice_indexes = []  # index of midi slice embeddings
+    for i, midi in enumerate(midis):
+        print('%d/%d' % (i + 1, len(midis)))
+        midi_tempo = midi.estimate_tempo()
+        midi_chroma = midi.get_chroma()
+        instruments_presence = get_slice_instruments_presence(midi, 1, midi.get_end_time(), instrument_indexes)[0]
+        total_velocity = sum(sum(midi_chroma))
+        midi_semitones = [sum(semitone) / total_velocity for semitone in midi_chroma]
+        midi_vector = [midi_tempo] + instruments_presence + midi_semitones
+        midi_vectors.append(midi_vector)
+        for midi_vector_slice in get_midi_vector_slices(midi, num_phrases_by_song[i], instrument_indexes):
+            midi_vectors_sliced.extend(midi_vector_slice)
+        if i == 0:
+            slice_indexes.append(list(range(num_phrases_by_song[i])))
+        else:
+            next_index = slice_indexes[-1][-1] + 1
+            slice_indexes.append(list(range(next_index, next_index + num_phrases_by_song[i])))
+    return np.array(midi_vectors), np.array(midi_vectors_sliced), slice_indexes
 
 
-def get_train_and_val_data(x_train, y_train, val_split):
-    val_len = int(len(x_train) * val_split)
-    x_train_tensors = tuple((tf.constant(i) for i in x_train[:-val_len]))
-    y_train_tensors = tuple((tf.constant(i) for i in y_train[:-val_len]))
-    x_val_tensors = tuple((tf.constant(i) for i in x_train[-val_len:]))
-    y_val_tensors = tuple((tf.constant(i) for i in y_train[-val_len:]))
-    train_data = tf.data.Dataset.from_tensors((x_train_tensors, y_train_tensors))
-    val_data = tf.data.Dataset.from_tensors((x_val_tensors, y_val_tensors))
-    return train_data, val_data
+def get_midi_vector_slices(midi, num_slices, instrument_indexes):
+    midi_end_time = midi.get_end_time()
+    slice_len = midi_end_time / num_slices
+    slice_starts = [i * slice_len for i in range(num_slices)]
+    slice_ends = slice_starts[1:] + [midi_end_time]
+
+    slice_tempos = get_slice_tempos(midi, slice_starts, slice_ends, midi_end_time)
+    slice_semitones = get_slice_semitones(midi, num_slices)
+    slice_instruments_presence = get_slice_instruments_presence(midi, num_slices, midi_end_time, instrument_indexes)
+
+    return [[slice_tempos[i]] + slice_instruments_presence[i] + slice_semitones[i] for i in range(num_slices)]
 
 
-def build_model(vocabulary_size, word_embeddings, layer_sizes, midi_vector_size):
-    model = Sequential(name='RNN')
-    model.add(layers.Embedding(vocabulary_size, word_embeddings.shape[1], trainable=False,
-                               embeddings_initializer=Constant(word_embeddings)))
-    for layer_size in layer_sizes:
-        model.add(layers.LSTM(layer_size, return_sequences=True))
-    model.add(layers.Dense(vocabulary_size))
-    model.compile(optimizer='adam', loss=loss)
-    return model
+def get_slice_tempos(midi, slice_starts, slice_ends, midi_end_time):
+    tempo_starts, tempos = midi.get_tempo_changes()
+    tempo_starts, tempos = list(tempo_starts), list(tempos)
+    tempo_ends = tempo_starts[1:] + [midi_end_time]  # for weighted average of tempos inside same slice
+    slice_tempos = [[] for i in range(len(slice_starts))]  # tempos in each slice
+    slice_tempo_lens = [[] for i in range(len(slice_starts))]  # len of tempos in each slice
+    slice_id = 0
+    for tempo_start, tempo_end, tempo in zip(tempo_starts, tempo_ends, tempos):
+        while slice_ends[slice_id] < tempo_end:  # next change is outside of slice
+            slice_tempos[slice_id].append(tempo)
+            slice_tempo_start = max(slice_starts[slice_id], tempo_start)
+            slice_tempo_lens[slice_id].append(slice_ends[slice_id] - slice_tempo_start)
+            slice_id += 1
+        slice_tempos[slice_id].append(tempo)
+        slice_tempo_start = max(slice_starts[slice_id], tempo_start)
+        slice_tempo_lens[slice_id].append(tempo_end - slice_tempo_start)
+    return [np.average(i, weights=j) for i, j in zip(slice_tempos, slice_tempo_lens)]
 
 
-def loss(labels, logits):
-    return tf.keras.losses.sparse_categorical_crossentropy(labels, logits, from_logits=True)
+def get_slice_semitones(midi, num_slices):
+    slices_chromas = np.array_split(midi.get_chroma(), num_slices, axis=1)
+    slice_semitones = []
+    for slice_chroma in slices_chromas:
+        slice_velocity = sum(sum(slice_chroma))
+        if slice_velocity == 0:
+            slice_semitones.append([0] * len(slice_chroma))
+        else:
+            slice_semitones.append([sum(semitone) / slice_velocity for semitone in slice_chroma])
+    return slice_semitones
 
 
-def get_checkpoints_callback(checkpoint_dir):
-    filepath_prefix = os.path.join(checkpoint_dir, "ckpt_{epoch}")
-    return tf.keras.callbacks.ModelCheckpoint(filepath=filepath_prefix, monitor='val_loss', save_weights_only=True)
+def get_slice_instruments_presence(midi, num_slices, midi_end_time, instrument_indexes):
+    midi_note_matrix = get_note_matrix(midi, midi_end_time, instrument_indexes)
+    slices_note_matrix = np.array_split(midi_note_matrix, num_slices, axis=1)
+    return [(np.sum(i, axis=1) / np.sum(i)).tolist() for i in slices_note_matrix]
 
 
-def generate_text(model, input_word, word_indexes, vocabulary, text_len, temperature=1.0):
-    current_word_index = tf.expand_dims([word_indexes[input_word]], 0)
-    text_generated = []
-    model.reset_states()
-    for i in range(text_len):
-        predicted_words = tf.squeeze(model(current_word_index), 0) / temperature  # remove the batch dimension
-        # use a categorical distribution to predict the next word
-        predicted_id = tf.random.categorical(predicted_words, num_samples=1)[-1, 0].numpy()
-        text_generated.append(vocabulary[predicted_id])
-        current_word_index = tf.expand_dims([predicted_id], 0)
-
-    return '%s %s' % (input_word, ' '.join(text_generated))
+def get_note_matrix(midi, midi_end_time, instrument_indexes):
+    note_matrix = np.zeros([len(instrument_indexes), int(midi_end_time)])
+    for instrument in midi.instruments:
+        row = note_matrix[instrument_indexes[instrument.program]]
+        for note in instrument.notes:
+            row[int(note.start): int(note.end) + 1] = 1
+    return note_matrix
 
 
-def write_to_file(history, generated_texts, layer_sizes, iteration):
-    layers_str = '_'.join([str(i) for i in layer_sizes])
-    dir_name = 'drive/My Drive/Colab results/lyric generator results/layers_%s' % layers_str
-    if not os.path.exists(dir_name):
-        os.makedirs(dir_name)
-    to_file = []
-    header = "epoch"
-    scores = []
-    epoch = 0
-    for key in history:
-        header = "%s,%s" % (header, key)
-        scores.append(history[key])
-
-    to_file.append(header)
-    for i in range(len(scores[0])):
-        epoch += 1
-        line = "%d" % epoch
-        for j in range(len(scores)):
-            line = "%s,%s" % (line, scores[j][i])
-        to_file.append(line)
-
-    with open('%s/train_results.csv' % dir_name, 'w') as file:
-        for line in to_file:
-            file.write("%s\n" % line)
-
-    with open('%s/test_results_%d.csv' % (dir_name, iteration), 'w') as file:
-        for line in generated_texts:
-            file.write("%s\n" % line)
+def get_set(texts, midi_indexes, slice_indexes, word_indexes, nlp, complex_mode):
+    x_words, x_midis, y = [], [], []
+    if complex_mode:
+        x_midis_sliced = []
+    for i in range(len(texts)):
+        text, midi = texts[i], midi_indexes[i]
+        words = [token.text for token in nlp(text.strip())]
+        text_word_indexes = [word_indexes[word] for word in words]  # indexes of words in this text
+        x_words.extend(text_word_indexes[:-1])  # shape = (len(text)-1 = num of "words in text except the last one")
+        x_midis.extend([midi] * (len(text_word_indexes) - 1))  # shape = (len(text)-1, len(midi_vector))
+        y_text = [[0] * len(word_indexes) for _ in
+                  range(len(text_word_indexes) - 1)]  # shape = (len(text)-1, len(vocab))
+        for j, word_index in enumerate(text_word_indexes[1:]):
+            y_text[j][word_index] = 1  # set the target one hot vectors
+        y.extend(y_text)
+        if complex_mode:
+            x_midis_sliced.extend(get_x_midi_sliced(words[:-1], slice_indexes[i]))
+    if complex_mode:
+        return [np.array(x_words), np.array(x_midis), np.array(x_midis_sliced)], np.array(y)
+    else:
+        return [np.array(x_words), np.array(x_midis)], np.array(y)
 
 
-train_subset = 5  # for speeding up debugging
+def get_x_midi_sliced(words, midi_sliced):
+    x_midi_sliced = []
+    midi_slice_idx = 0
+    for word in words:
+        x_midi_sliced.append(midi_sliced[midi_slice_idx])
+        if word == '&':  # end of phrase
+            midi_slice_idx += 1
+    return x_midi_sliced
 
-mode = 'complete song'
-# mode = 'sliced song'
-# dataset_dir = 'dataset'  # for pc
-dataset_dir = 'DL3/dataset'  # for colab
+
+# def build_model(word_embeddings, midi_vector_len, lstm_lens, dense_lens):
+#     vocab_len = word_embeddings.shape[0]
+#     embedding_len = word_embeddings.shape[1]
+#     text_in = Input(shape=(1,))
+#     midi_in = Input(shape=(midi_vector_len,))
+#     # to start the lstm layer loop
+#     lstm = Embedding(vocab_len, embedding_len, trainable=False, weights=[word_embeddings], input_length=1)(text_in)
+#     for lstm_len in lstm_lens:
+#         lstm = LSTM(lstm_len)(lstm)
+#     # to start the dense layer loop
+#     dense = concatenate([lstm, midi_in])
+#     for dense_len in dense_lens:
+#         dense = Dense(dense_len)(dense)
+#     output = Dense(vocab_len, activation='softmax')(dense)
+#     model = Model([text_in, midi_in], output)
+#     model.compile('adam', CategoricalCrossentropy(), metrics=['acc'])
+#     return model
+
+
+# def get_train_and_val_data(x_train, y_train, val_split):
+#     val_len = int(len(x_train) * val_split)
+#     x_train_tensors = tuple((tf.constant(i) for i in x_train[:-val_len]))
+#     y_train_tensors = tuple((tf.constant(i) for i in y_train[:-val_len]))
+#     x_val_tensors = tuple((tf.constant(i) for i in x_train[-val_len:]))
+#     y_val_tensors = tuple((tf.constant(i) for i in y_train[-val_len:]))
+#     train_data = tf.data.Dataset.from_tensors((x_train_tensors, y_train_tensors))
+#     val_data = tf.data.Dataset.from_tensors((x_val_tensors, y_val_tensors))
+#     return train_data, val_data
+#
+#
+# def build_model(vocabulary_size, word_embeddings, layer_sizes, midi_vector_size):
+#     model = Sequential(name='RNN')
+#     model.add(layers.Embedding(vocabulary_size, word_embeddings.shape[1], trainable=False,
+#                                embeddings_initializer=Constant(word_embeddings)))
+#     for layer_size in layer_sizes:
+#         model.add(layers.LSTM(layer_size, return_sequences=True))
+#     model.add(layers.Dense(vocabulary_size))
+#     model.compile(optimizer='adam', loss=loss)
+#     return model
+#
+#
+# def loss(labels, logits):
+#     return tf.keras.losses.sparse_categorical_crossentropy(labels, logits, from_logits=True)
+#
+#
+# def get_checkpoints_callback(checkpoint_dir):
+#     filepath_prefix = os.path.join(checkpoint_dir, "ckpt_{epoch}")
+#     return tf.keras.callbacks.ModelCheckpoint(filepath=filepath_prefix, monitor='val_loss', save_weights_only=True)
+
+
+# def generate_text(model, input_word, word_indexes, vocabulary, output_text_len, midi, temperature=1.0):
+#     # current_word_index = tf.expand_dims([word_indexes[input_word]], 0)
+#     current_word_index = word_indexes[input_word]
+#     text_generated = []
+#     model.reset_states()
+#     for i in range(output_text_len):
+#         # predicted_words = tf.squeeze(model(current_word_index, midi), 0) / temperature  # remove the batch dimension
+#         predicted_words = tf.squeeze(model.predict([[current_word_index], [midi]]), 0) / temperature
+#         # use a categorical distribution to predict the next word
+#         predicted_id = tf.random.categorical(predicted_words, num_samples=1)[-1, 0].numpy()
+#         text_generated.append(vocabulary[predicted_id])
+#         current_word_index = tf.expand_dims([predicted_id], 0)
+#     return '%s %s' % (input_word, ' '.join(text_generated))
+
+
+# def write_to_file(history, generated_texts, layer_sizes, iteration):
+#     layers_str = '_'.join([str(i) for i in layer_sizes])
+#     dir_name = 'drive/My Drive/Colab results/lyric generator results/layers_%s' % layers_str
+#     if not os.path.exists(dir_name):
+#         os.makedirs(dir_name)
+#     to_file = []
+#     header = "epoch"
+#     scores = []
+#     epoch = 0
+#     for key in history:
+#         header = "%s,%s" % (header, key)
+#         scores.append(history[key])
+#
+#     to_file.append(header)
+#     for i in range(len(scores[0])):
+#         epoch += 1
+#         line = "%d" % epoch
+#         for j in range(len(scores)):
+#             line = "%s,%s" % (line, scores[j][i])
+#         to_file.append(line)
+#
+#     with open('%s/train_results.csv' % dir_name, 'w') as file:
+#         for line in to_file:
+#             file.write("%s\n" % line)
+#
+#     with open('%s/test_results_%d.csv' % (dir_name, iteration), 'w') as file:
+#         for line in generated_texts:
+#             file.write("%s\n" % line)
+
+
+train_subset = 1  # for speeding up debugging
+
+dataset_dir = 'dataset'  # for pc
+# dataset_dir = 'DL3/dataset'  # for colab
 instances_train = pd.read_csv('%s/lyrics_train_set.csv' % dataset_dir, header=None)
 instances_test = pd.read_csv('%s/lyrics_test_set.csv' % dataset_dir, header=None)
 
 if train_subset > 0:
     instances_train = instances_train[:train_subset]
-    instances_test = instances_test[:train_subset]
 
 instrument_indexes = {}
-print('loading midis and texts...')
+print('loading texts and midis...')
+print('train:')
 midis_train, texts_train = get_midis_and_texts(instances_train, dataset_dir, instrument_indexes)
+print('test:')
 midis_test, texts_test = get_midis_and_texts(instances_test, dataset_dir, instrument_indexes)
-print('generating midi vectors...')
-midi_vectors_train = get_midi_vectors(midis_train, texts_train, instrument_indexes, mode)
-midi_vectors_test = get_midi_vectors(midis_test, midis_test, instrument_indexes, mode)
 
-print('building vocabulary...')
+print('building word embeddings...')
 # nlp = spacy.load('en_core_web_md')  # 300 dim embeddings
 nlp = spacy.load('en_core_web_sm')  # smaller embeddings
 word_indexes, word_embeddings, vocabulary = get_vocabulary_and_word_embeddings(texts_train, texts_test, nlp)
 
-print('building train and test sets...')
+print('building midi vectors...')
+num_phrases_by_song_train = [text.count('&') for text in texts_train]
+num_phrases_by_song_test = [text.count('&') for text in texts_test]
+print('train:')
+midi_vectors_train, midi_vectors_sliced_train, slice_indexes_train = get_midi_vectors(
+    midis_train, instrument_indexes, num_phrases_by_song_train)
+print('test:')
+midi_vectors_test, midi_vectors_sliced_test, slice_indexes_test = get_midi_vectors(
+    midis_test, instrument_indexes, num_phrases_by_song_test)
+midi_embeddings = np.concatenate([midi_vectors_train, midi_vectors_test])
+midi_sliced_embeddings = np.concatenate([midi_vectors_sliced_train, midi_vectors_sliced_test])
+
 val_split = 0.2
-x_train, y_train, x_test, y_test = get_train_and_test_sets(texts_train, texts_test, word_indexes, nlp,
-                                                           midi_vectors_train, midi_vectors_test)
-train_data, val_data = get_train_and_val_data(x_train, y_train, val_split)
+complex_mode = True
 
-# build model
-layer_sizes = [128]
-model = build_model(len(vocabulary), word_embeddings, layer_sizes, len(midi_vectors_train[0]))
-model.summary()
-checkpoint_dir = './training_checkpoints'
-checkpoint_callback = get_checkpoints_callback(checkpoint_dir)
+midi_indexes_train = range(len(midi_vectors_train))
+val_len = int(len(texts_train) * val_split)
+print('building train set...')
+x_train, y_train = get_set(texts_train[:-val_len], midi_indexes_train[:-val_len], slice_indexes_train[:-val_len],
+                           word_indexes, nlp, complex_mode)
+print('building validation set...')
+x_val, y_val = get_set(texts_train[-val_len:], midi_indexes_train[-val_len:], slice_indexes_train[-val_len:],
+                       word_indexes, nlp, complex_mode)
 
-print('training model...')
-history = model.fit(train_data, epochs=10, validation_data=val_data, callbacks=[checkpoint_callback])
+# # build model
+# layer_sizes = [128]
+# model = build_model(len(vocabulary), word_embeddings, layer_sizes, len(midi_vectors_train[0]))
+# model.summary()
+# checkpoint_dir = './training_checkpoints'
+# checkpoint_callback = get_checkpoints_callback(checkpoint_dir)
+#
+# print('training model...')
+# history = model.fit(train_data, epochs=10, validation_data=val_data, callbacks=[checkpoint_callback])
+#
+# # get best checkpoint
+# tf.train.latest_checkpoint(checkpoint_dir)
+# model.load_weights(tf.train.latest_checkpoint(checkpoint_dir))
+# model.build(tf.TensorShape([1, None]))
+#
+# # generate text for all the 5 test melodies, 3 times
+# for iteration in range(3):
+#     generated_texts = []
+#     for i, text in enumerate(x_test):
+#         print('\ntarget text %d:' % i)
+#         print(' '.join(vocabulary[text]))
+#
+#         generated_text = generate_text(model, vocabulary[text[0]], word_indexes, vocabulary, text_len=len(text))
+#         print('generated text %d:' % i)
+#         print(generated_text)
+#
+#         generated_texts.append(generated_text)
+#     write_to_file(history.history, generated_texts, layer_sizes, iteration + 1)
 
-# get best checkpoint
-tf.train.latest_checkpoint(checkpoint_dir)
-model.load_weights(tf.train.latest_checkpoint(checkpoint_dir))
-model.build(tf.TensorShape([1, None]))
 
-# generate text for all the 5 test melodies, 3 times
-for iteration in range(3):
-    generated_texts = []
-    for i, text in enumerate(x_test):
-        print('\ntarget text %d:' % i)
-        print(' '.join(vocabulary[text]))
+# # build model
+# lstm_lens = [128]
+# dense_lens = [512]
+# epochs = 10
+# batch_size = 256
+#
+# model = build_model(word_embeddings, len(midi_vectors_train[0]), lstm_lens, dense_lens)
+# model.summary()
+# checkpoint = ModelCheckpoint('checkpoint.h5', save_best_only=True)
+# history = model.fit(x_train, y_train, batch_size, epochs, callbacks=[checkpoint], validation_data=(x_val, y_val))
 
-        generated_text = generate_text(model, vocabulary[text[0]], word_indexes, vocabulary, text_len=len(text))
-        print('generated text %d:' % i)
-        print(generated_text)
+# # generate text for all the 5 test melodies, 3 times
+# for iteration in range(3):
+#     generated_texts = []
+#     i = 0
+#     for text, midi in zip(texts_test, midi_vectors_test):
+#         text = text.strip()
+#         tokens = nlp(text)
+#         generated_text = generate_text(model, tokens[0].text, word_indexes, vocabulary, len(text), midi)
+#         print('\ntarget text %d:' % i)
+#         print(text)
+#         print('generated text %d:' % i)
+#         print(generated_text)
+#         generated_texts.append(generated_text)
+#         i += 1
+#     write_to_file(history.history, generated_texts, lstm_lens, iteration + 1)
 
-        generated_texts.append(generated_text)
-    write_to_file(history.history, generated_texts, layer_sizes, iteration + 1)
+print('done')
