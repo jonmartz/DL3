@@ -59,7 +59,7 @@ def get_vocabulary_and_word_embeddings(texts_train, texts_test, nlp):
     return word_indexes, np.array(word_embeddings), np.array(vocabulary)
 
 
-def get_midi_vectors(midis, instrument_indexes, num_phrases_by_song):
+def get_midi_vectors(midis, instrument_indexes, num_phrases_by_song, init_slice_index=0):
     midi_vectors = []
     midi_vectors_sliced = []
     slice_indexes = []  # index of midi slice embeddings
@@ -75,7 +75,7 @@ def get_midi_vectors(midis, instrument_indexes, num_phrases_by_song):
         for midi_vector_slice in get_midi_vector_slices(midi, num_phrases_by_song[i], instrument_indexes):
             midi_vectors_sliced.extend(midi_vector_slice)
         if i == 0:
-            slice_indexes.append(list(range(num_phrases_by_song[i])))
+            slice_indexes.append(list(range(num_phrases_by_song[i] + init_slice_index)))
         else:
             next_index = slice_indexes[-1][-1] + 1
             slice_indexes.append(list(range(next_index, next_index + num_phrases_by_song[i])))
@@ -141,56 +141,56 @@ def get_note_matrix(midi, midi_end_time, instrument_indexes):
     return note_matrix
 
 
-def get_set(texts, midi_indexes, slice_indexes, word_indexes, nlp, complex_mode):
+def get_set(texts, midi_indexes, slices_indexes, word_indexes, nlp, complex_mode):
     x_words, x_midis, y = [], [], []
     if complex_mode:
         x_midis_sliced = []
     for i in range(len(texts)):
-        text, midi = texts[i], midi_indexes[i]
+        text, midi_index = texts[i], midi_indexes[i]
         words = [token.text for token in nlp(text.strip())]
         text_word_indexes = [word_indexes[word] for word in words]  # indexes of words in this text
         x_words.extend(text_word_indexes[:-1])  # shape = (len(text)-1 = num of "words in text except the last one")
-        x_midis.extend([midi] * (len(text_word_indexes) - 1))  # shape = (len(text)-1, len(midi_vector))
+        x_midis.extend([midi_index] * (len(text_word_indexes) - 1))  # shape = (len(text)-1, len(midi_vector))
         y_text = [[0] * len(word_indexes) for _ in
                   range(len(text_word_indexes) - 1)]  # shape = (len(text)-1, len(vocab))
         for j, word_index in enumerate(text_word_indexes[1:]):
             y_text[j][word_index] = 1  # set the target one hot vectors
         y.extend(y_text)
         if complex_mode:
-            x_midis_sliced.extend(get_x_midi_sliced(words[:-1], slice_indexes[i]))
+            x_midis_sliced.extend(get_x_midi_sliced(words[:-1], slices_indexes[i]))
     if complex_mode:
         return [np.array(x_words), np.array(x_midis), np.array(x_midis_sliced)], np.array(y)
     else:
         return [np.array(x_words), np.array(x_midis)], np.array(y)
 
 
-def get_x_midi_sliced(words, midi_sliced):
+def get_x_midi_sliced(words, slice_indexes):
     x_midi_sliced = []
     midi_slice_idx = 0
     for word in words:
-        x_midi_sliced.append(midi_sliced[midi_slice_idx])
+        x_midi_sliced.append(slice_indexes[midi_slice_idx])
         if word == '&':  # end of phrase
             midi_slice_idx += 1
     return x_midi_sliced
 
 
-# def build_model(word_embeddings, midi_vector_len, lstm_lens, dense_lens):
-#     vocab_len = word_embeddings.shape[0]
-#     embedding_len = word_embeddings.shape[1]
-#     text_in = Input(shape=(1,))
-#     midi_in = Input(shape=(midi_vector_len,))
-#     # to start the lstm layer loop
-#     lstm = Embedding(vocab_len, embedding_len, trainable=False, weights=[word_embeddings], input_length=1)(text_in)
-#     for lstm_len in lstm_lens:
-#         lstm = LSTM(lstm_len)(lstm)
-#     # to start the dense layer loop
-#     dense = concatenate([lstm, midi_in])
-#     for dense_len in dense_lens:
-#         dense = Dense(dense_len)(dense)
-#     output = Dense(vocab_len, activation='softmax')(dense)
-#     model = Model([text_in, midi_in], output)
-#     model.compile('adam', CategoricalCrossentropy(), metrics=['acc'])
-#     return model
+def build_model(word_embeddings, midi_vector_len, lstm_lens, dense_lens):
+    vocab_len = word_embeddings.shape[0]
+    embedding_len = word_embeddings.shape[1]
+    text_in = Input(shape=(1,))
+    midi_in = Input(shape=(midi_vector_len,))
+    # to start the lstm layer loop
+    lstm = Embedding(vocab_len, embedding_len, trainable=False, weights=[word_embeddings], input_length=1)(text_in)
+    for lstm_len in lstm_lens:
+        lstm = LSTM(lstm_len)(lstm)
+    # to start the dense layer loop
+    dense = concatenate([lstm, midi_in])
+    for dense_len in dense_lens:
+        dense = Dense(dense_len)(dense)
+    output = Dense(vocab_len, activation='softmax')(dense)
+    model = Model([text_in, midi_in], output)
+    model.compile('adam', CategoricalCrossentropy(), metrics=['acc'])
+    return model
 
 
 # def get_train_and_val_data(x_train, y_train, val_split):
@@ -269,7 +269,7 @@ def get_x_midi_sliced(words, midi_sliced):
 #             file.write("%s\n" % line)
 
 
-train_subset = 1  # for speeding up debugging
+train_subset = 5  # for speeding up debugging
 
 dataset_dir = 'dataset'  # for pc
 # dataset_dir = 'DL3/dataset'  # for colab
@@ -291,7 +291,7 @@ print('building word embeddings...')
 nlp = spacy.load('en_core_web_sm')  # smaller embeddings
 word_indexes, word_embeddings, vocabulary = get_vocabulary_and_word_embeddings(texts_train, texts_test, nlp)
 
-print('building midi vectors...')
+print('building midi embeddings...')
 num_phrases_by_song_train = [text.count('&') for text in texts_train]
 num_phrases_by_song_test = [text.count('&') for text in texts_test]
 print('train:')
@@ -299,14 +299,16 @@ midi_vectors_train, midi_vectors_sliced_train, slice_indexes_train = get_midi_ve
     midis_train, instrument_indexes, num_phrases_by_song_train)
 print('test:')
 midi_vectors_test, midi_vectors_sliced_test, slice_indexes_test = get_midi_vectors(
-    midis_test, instrument_indexes, num_phrases_by_song_test)
+    midis_test, instrument_indexes, num_phrases_by_song_test, init_slice_index=slice_indexes_train[-1][-1] + 1)
 midi_embeddings = np.concatenate([midi_vectors_train, midi_vectors_test])
 midi_sliced_embeddings = np.concatenate([midi_vectors_sliced_train, midi_vectors_sliced_test])
 
 val_split = 0.2
 complex_mode = True
 
-midi_indexes_train = range(len(midi_vectors_train))
+train_len = len(midis_train)
+midi_indexes_train = list(range(train_len))
+midi_indexes_test = list(range(train_len, train_len + len(midi_vectors_test)))
 val_len = int(len(texts_train) * val_split)
 print('building train set...')
 x_train, y_train = get_set(texts_train[:-val_len], midi_indexes_train[:-val_len], slice_indexes_train[:-val_len],
@@ -314,6 +316,8 @@ x_train, y_train = get_set(texts_train[:-val_len], midi_indexes_train[:-val_len]
 print('building validation set...')
 x_val, y_val = get_set(texts_train[-val_len:], midi_indexes_train[-val_len:], slice_indexes_train[-val_len:],
                        word_indexes, nlp, complex_mode)
+print('building test set...')
+x_test, y_test = get_set(texts_test, midi_indexes_test, slice_indexes_test, word_indexes, nlp, complex_mode)
 
 # # build model
 # layer_sizes = [128]
@@ -344,32 +348,33 @@ x_val, y_val = get_set(texts_train[-val_len:], midi_indexes_train[-val_len:], sl
 #         generated_texts.append(generated_text)
 #     write_to_file(history.history, generated_texts, layer_sizes, iteration + 1)
 
+# build model
 
-# # build model
-# lstm_lens = [128]
-# dense_lens = [512]
-# epochs = 10
-# batch_size = 256
-#
-# model = build_model(word_embeddings, len(midi_vectors_train[0]), lstm_lens, dense_lens)
-# model.summary()
-# checkpoint = ModelCheckpoint('checkpoint.h5', save_best_only=True)
-# history = model.fit(x_train, y_train, batch_size, epochs, callbacks=[checkpoint], validation_data=(x_val, y_val))
+# todo: here
+lstm_lens = [128]
+dense_lens = [1024]
+epochs = 10
+batch_size = 256
 
-# # generate text for all the 5 test melodies, 3 times
-# for iteration in range(3):
-#     generated_texts = []
-#     i = 0
-#     for text, midi in zip(texts_test, midi_vectors_test):
-#         text = text.strip()
-#         tokens = nlp(text)
-#         generated_text = generate_text(model, tokens[0].text, word_indexes, vocabulary, len(text), midi)
-#         print('\ntarget text %d:' % i)
-#         print(text)
-#         print('generated text %d:' % i)
-#         print(generated_text)
-#         generated_texts.append(generated_text)
-#         i += 1
-#     write_to_file(history.history, generated_texts, lstm_lens, iteration + 1)
+model = build_model(word_embeddings, len(midi_vectors_train[0]), lstm_lens, dense_lens)
+model.summary()
+checkpoint = ModelCheckpoint('checkpoint.h5', save_best_only=True)
+history = model.fit(x_train, y_train, batch_size, epochs, callbacks=[checkpoint], validation_data=(x_val, y_val))
+
+# generate text for all the 5 test melodies, 3 times
+for iteration in range(3):
+    generated_texts = []
+    i = 0
+    for text, midi in zip(texts_test, midi_vectors_test):
+        text = text.strip()
+        tokens = nlp(text)
+        generated_text = generate_text(model, tokens[0].text, word_indexes, vocabulary, len(text), midi)
+        print('\ntarget text %d:' % i)
+        print(text)
+        print('generated text %d:' % i)
+        print(generated_text)
+        generated_texts.append(generated_text)
+        i += 1
+    write_to_file(history.history, generated_texts, lstm_lens, iteration + 1)
 
 print('done')
