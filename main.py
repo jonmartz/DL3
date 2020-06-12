@@ -129,7 +129,14 @@ def get_slice_semitones(midi, num_slices):
 def get_slice_instruments_presence(midi, num_slices, midi_end_time, instrument_indexes):
     midi_note_matrix = get_note_matrix(midi, midi_end_time, instrument_indexes)
     slices_note_matrix = np.array_split(midi_note_matrix, num_slices, axis=1)
-    return [(np.sum(i, axis=1) / np.sum(i)).tolist() for i in slices_note_matrix]
+    slice_instruments_presence = []
+    for slice_note_matrix in slices_note_matrix:
+        total_presence = np.sum(slice_note_matrix)
+        if total_presence == 0:
+            slice_instruments_presence.append([0] for _ in range(len(instrument_indexes)))
+        else:
+            slice_instruments_presence.append((np.sum(slice_note_matrix, axis=1) / total_presence).tolist())
+    return slice_instruments_presence
 
 
 def get_note_matrix(midi, midi_end_time, instrument_indexes):
@@ -149,10 +156,9 @@ def get_set(texts, midi_indexes, slices_indexes, word_indexes, nlp, complex_mode
         text, midi_index = texts[i], midi_indexes[i]
         words = [token.text for token in nlp(text.strip())]
         text_word_indexes = [word_indexes[word] for word in words]  # indexes of words in this text
-        x_words.extend(text_word_indexes[:-1])  # shape = (len(text)-1 = num of "words in text except the last one")
-        x_midis.extend([midi_index] * (len(text_word_indexes) - 1))  # shape = (len(text)-1, len(midi_vector))
-        y_text = [[0] * len(word_indexes) for _ in
-                  range(len(text_word_indexes) - 1)]  # shape = (len(text)-1, len(vocab))
+        x_words.extend(text_word_indexes[:-1])  # shape (len(text)-1 = num of "words in text except the last one")
+        x_midis.extend([midi_index] * (len(text_word_indexes) - 1))  # shape (len(text)-1, len(midi_vector))
+        y_text = [[0] * len(word_indexes) for _ in range(len(text_word_indexes) - 1)]  # shape (len(text)-1, len(vocab))
         for j, word_index in enumerate(text_word_indexes[1:]):
             y_text[j][word_index] = 1  # set the target one hot vectors
         y.extend(y_text)
@@ -174,13 +180,13 @@ def get_x_midi_sliced(words, slice_indexes):
     return x_midi_sliced
 
 
-def build_model(word_embeddings, midi_vector_len, lstm_lens, dense_lens):
+def build_model(word_embeddings, midi_vector_len, lstm_lens, dense_lens, complex_mode=False, slice_embeddings=None):
     vocab_len = word_embeddings.shape[0]
     embedding_len = word_embeddings.shape[1]
-    text_in = Input(shape=(1,))
+    word_in = Input(shape=(1,))
     midi_in = Input(shape=(midi_vector_len,))
     # to start the lstm layer loop
-    lstm = Embedding(vocab_len, embedding_len, trainable=False, weights=[word_embeddings], input_length=1)(text_in)
+    lstm = Embedding(word_embeddings.shape[0], embedding_len, trainable=False, weights=[word_embeddings], input_length=1)(word_in)
     for lstm_len in lstm_lens:
         lstm = LSTM(lstm_len)(lstm)
     # to start the dense layer loop
@@ -188,7 +194,7 @@ def build_model(word_embeddings, midi_vector_len, lstm_lens, dense_lens):
     for dense_len in dense_lens:
         dense = Dense(dense_len)(dense)
     output = Dense(vocab_len, activation='softmax')(dense)
-    model = Model([text_in, midi_in], output)
+    model = Model([word_in, midi_in], output)
     model.compile('adam', CategoricalCrossentropy(), metrics=['acc'])
     return model
 
@@ -269,7 +275,7 @@ def build_model(word_embeddings, midi_vector_len, lstm_lens, dense_lens):
 #             file.write("%s\n" % line)
 
 
-train_subset = 5  # for speeding up debugging
+train_subset = 20  # for speeding up debugging
 
 dataset_dir = 'dataset'  # for pc
 # dataset_dir = 'DL3/dataset'  # for colab
@@ -350,13 +356,12 @@ x_test, y_test = get_set(texts_test, midi_indexes_test, slice_indexes_test, word
 
 # build model
 
-# todo: here
 lstm_lens = [128]
 dense_lens = [1024]
 epochs = 10
 batch_size = 256
 
-model = build_model(word_embeddings, len(midi_vectors_train[0]), lstm_lens, dense_lens)
+model = build_model(word_embeddings, len(midi_vectors_train[0]), lstm_lens, dense_lens, complex_mode)
 model.summary()
 checkpoint = ModelCheckpoint('checkpoint.h5', save_best_only=True)
 history = model.fit(x_train, y_train, batch_size, epochs, callbacks=[checkpoint], validation_data=(x_val, y_val))
