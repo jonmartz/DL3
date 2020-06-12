@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import spacy
 import pretty_midi
-
+import json
 
 # import tensorflow as tf
 # from tensorflow.keras import Sequential
@@ -18,48 +18,92 @@ import pretty_midi
 # from keras.callbacks import ModelCheckpoint
 
 
-def get_midis_and_texts(instances, dataset_dir, instrument_indexes):
-    midis = []
-    texts = []
-    failed_num = 0
-    for index, row in instances.iterrows():
-        artist = row[0].strip().replace(' ', '_')
-        song_name = row[1].strip().replace(' ', '_')
-        filename = '%s_-_%s.mid' % (artist, song_name)
-        failed_text = '\t'
-        try:
-            midi = pretty_midi.PrettyMIDI('%s/midi_files/%s' % (dataset_dir, filename))
-            for instrument in midi.instruments:
-                # if not instrument.is_drum:
-                instrument_id = instrument.program
-                if instrument_id not in instrument_indexes:
-                    instrument_indexes[instrument_id] = len(instrument_indexes)
-            midis.append(midi)
-            texts.append(row[2])
-        except:
-            failed_text = ' FAILED'
-            failed_num += 1
-        print('%d/%d%s\t%s' % (index + 1, len(instances), failed_text, filename))
-    print('FAILED = %d/%d' % (failed_num, len(instances)))
+def get_midis_and_texts(instances, dataset_dir, instrument_indexes, set):
+    cache_path = '%s/texts_%s.json' % (cache_dir, set)
+    if not os.path.exists(cache_path):
+        midis = []
+        texts = []
+        failed_num = 0
+        for index, row in instances.iterrows():
+            artist = row[0].strip().replace(' ', '_')
+            song_name = row[1].strip().replace(' ', '_')
+            filename = '%s_-_%s.mid' % (artist, song_name)
+            failed_text = '\t'
+            try:
+                midi = pretty_midi.PrettyMIDI('%s/midi_files/%s' % (dataset_dir, filename))
+                for instrument in midi.instruments:
+                    # if not instrument.is_drum:
+                    instrument_id = instrument.program
+                    if instrument_id not in instrument_indexes:
+                        instrument_indexes[instrument_id] = len(instrument_indexes)
+                midis.append(midi)
+                texts.append(row[2])
+            except:
+                failed_text = ' FAILED'
+                failed_num += 1
+            print('%d/%d%s\t%s' % (index + 1, len(instances), failed_text, filename))
+        print('FAILED = %d/%d' % (failed_num, len(instances)))
+        with open(cache_path, 'w') as file:
+            json.dump(texts, file)
+    else:
+        with open(cache_path, 'r') as file:
+            texts = json.load(file)
+        midis = None
     return midis, texts
 
 
 def get_vocabulary_and_word_embeddings(texts_train, texts_test, nlp):
-    word_indexes = {}
-    vocabulary, word_embeddings = [], []
-    for texts in [texts_train, texts_test]:
-        for text in texts:
-            tokens = nlp(text.strip())
-            for token in tokens:
-                word = token.text
-                if word not in vocabulary:
-                    word_indexes[word] = len(word_indexes)
-                    vocabulary.append(word)
-                    word_embeddings.append(token.vector)
+    if not os.path.exists('%s/word_indexes.json' % cache_dir):
+        word_indexes = {}
+        vocabulary, word_embeddings = [], []
+        for texts in [texts_train, texts_test]:
+            for text in texts:
+                tokens = nlp(text.strip())
+                for token in tokens:
+                    word = token.text
+                    if word not in vocabulary:
+                        word_indexes[word] = len(word_indexes)
+                        vocabulary.append(word)
+                        word_embeddings.append(token.vector.tolist())
+        for file_name in ['word_indexes', 'word_embeddings', 'vocabulary']:
+            with open('%s/%s.json' % (cache_dir, file_name), 'w') as file:
+                json.dump(eval(file_name), file)
+    else:
+        structures = []
+        for file_name in ['word_indexes', 'word_embeddings', 'vocabulary']:
+            with open('%s/%s.json' % (cache_dir, file_name), 'r') as file:
+                structures.append(json.load(file))
+        word_indexes, word_embeddings, vocabulary = structures
     return word_indexes, np.array(word_embeddings), np.array(vocabulary)
 
 
-def get_midi_vectors(midis, instrument_indexes, num_phrases_by_song, init_slice_index=0):
+def get_midi_embeddings():
+    if not os.path.exists('%s/midi_embeddings.json' % cache_dir):
+        print('train:')
+        midi_vectors_train, midi_vectors_sliced_train, slice_indexes_train = get_midi_vectors(
+            midis_train, instrument_indexes, texts_train)
+        print('test:')
+        midi_vectors_test, midi_vectors_sliced_test, slice_indexes_test = get_midi_vectors(
+            midis_test, instrument_indexes, texts_test, init_slice_index=slice_indexes_train[-1][-1] + 1)
+        # midi_embeddings = np.concatenate([midi_vectors_train, midi_vectors_test])
+        # midi_sliced_embeddings = np.concatenate([midi_vectors_sliced_train, midi_vectors_sliced_test])
+        midi_embeddings = midi_vectors_train + midi_vectors_test
+        midi_sliced_embeddings = midi_vectors_sliced_train + midi_vectors_sliced_test
+
+        for file_name in ['midi_embeddings', 'midi_sliced_embeddings', 'slice_indexes_train', 'slice_indexes_test']:
+            with open('%s/%s.json' % (cache_dir, file_name), 'w') as file:
+                json.dump(eval(file_name), file)
+    else:
+        structures = []
+        for file_name in ['midi_embeddings', 'midi_sliced_embeddings', 'slice_indexes_train', 'slice_indexes_test']:
+            with open('%s/%s.json' % (cache_dir, file_name), 'r') as file:
+                structures.append(json.load(file))
+        midi_embeddings, midi_sliced_embeddings, slice_indexes_train, slice_indexes_test = structures
+    return np.array(midi_embeddings), np.array(midi_sliced_embeddings), slice_indexes_train, slice_indexes_test
+
+
+def get_midi_vectors(midis, instrument_indexes, texts, init_slice_index=0):
+    num_phrases_by_song = [text.count('&') for text in texts]
     midi_vectors = []
     midi_vectors_sliced = []
     slice_indexes = []  # index of midi slice embeddings
@@ -73,13 +117,13 @@ def get_midi_vectors(midis, instrument_indexes, num_phrases_by_song, init_slice_
         midi_vector = [midi_tempo] + instruments_presence + midi_semitones
         midi_vectors.append(midi_vector)
         for midi_vector_slice in get_midi_vector_slices(midi, num_phrases_by_song[i], instrument_indexes):
-            midi_vectors_sliced.extend(midi_vector_slice)
+            midi_vectors_sliced.append(midi_vector_slice)
         if i == 0:
             slice_indexes.append(list(range(num_phrases_by_song[i] + init_slice_index)))
         else:
             next_index = slice_indexes[-1][-1] + 1
             slice_indexes.append(list(range(next_index, next_index + num_phrases_by_song[i])))
-    return np.array(midi_vectors), np.array(midi_vectors_sliced), slice_indexes
+    return midi_vectors, midi_vectors_sliced, slice_indexes
 
 
 def get_midi_vector_slices(midi, num_slices, instrument_indexes):
@@ -92,7 +136,11 @@ def get_midi_vector_slices(midi, num_slices, instrument_indexes):
     slice_semitones = get_slice_semitones(midi, num_slices)
     slice_instruments_presence = get_slice_instruments_presence(midi, num_slices, midi_end_time, instrument_indexes)
 
-    return [[slice_tempos[i]] + slice_instruments_presence[i] + slice_semitones[i] for i in range(num_slices)]
+    midi_vector_slices = []
+    for i in range(num_slices):
+        midi_vector_slice = [slice_tempos[i]] + slice_instruments_presence[i] + slice_semitones[i]
+        midi_vector_slices.append(midi_vector_slice)
+    return midi_vector_slices
 
 
 def get_slice_tempos(midi, slice_starts, slice_ends, midi_end_time):
@@ -133,7 +181,7 @@ def get_slice_instruments_presence(midi, num_slices, midi_end_time, instrument_i
     for slice_note_matrix in slices_note_matrix:
         total_presence = np.sum(slice_note_matrix)
         if total_presence == 0:
-            slice_instruments_presence.append([0] for _ in range(len(instrument_indexes)))
+            slice_instruments_presence.append([0] * len(instrument_indexes))
         else:
             slice_instruments_presence.append((np.sum(slice_note_matrix, axis=1) / total_presence).tolist())
     return slice_instruments_presence
@@ -174,7 +222,10 @@ def get_x_midi_sliced(words, slice_indexes):
     x_midi_sliced = []
     midi_slice_idx = 0
     for word in words:
-        x_midi_sliced.append(slice_indexes[midi_slice_idx])
+        try:
+            x_midi_sliced.append(slice_indexes[midi_slice_idx])
+        except:
+            print('oops')
         if word == '&':  # end of phrase
             midi_slice_idx += 1
     return x_midi_sliced
@@ -275,46 +326,41 @@ def build_model(word_embeddings, midi_vector_len, lstm_lens, dense_lens, complex
 #             file.write("%s\n" % line)
 
 
-train_subset = 20  # for speeding up debugging
+# base_dir = 'DL3/'  # for colab
+base_dir = ''
+train_subset = 0  # for speeding up debugging. select 0 for whole train set
 
-dataset_dir = 'dataset'  # for pc
-# dataset_dir = 'DL3/dataset'  # for colab
+dataset_dir = '%sdataset' % base_dir
+cache_dir = '%scaches/%d' % (base_dir, train_subset)
 instances_train = pd.read_csv('%s/lyrics_train_set.csv' % dataset_dir, header=None)
 instances_test = pd.read_csv('%s/lyrics_test_set.csv' % dataset_dir, header=None)
 
 if train_subset > 0:
     instances_train = instances_train[:train_subset]
 
+if not os.path.exists(cache_dir):
+    os.makedirs(cache_dir)
 instrument_indexes = {}
 print('loading texts and midis...')
 print('train:')
-midis_train, texts_train = get_midis_and_texts(instances_train, dataset_dir, instrument_indexes)
+midis_train, texts_train = get_midis_and_texts(instances_train, dataset_dir, instrument_indexes, 'train')
 print('test:')
-midis_test, texts_test = get_midis_and_texts(instances_test, dataset_dir, instrument_indexes)
+midis_test, texts_test = get_midis_and_texts(instances_test, dataset_dir, instrument_indexes, 'test')
 
 print('building word embeddings...')
 # nlp = spacy.load('en_core_web_md')  # 300 dim embeddings
-nlp = spacy.load('en_core_web_sm')  # smaller embeddings
+nlp = spacy.load('en_core_web_sm')  # smaller embeddingscache_dir
 word_indexes, word_embeddings, vocabulary = get_vocabulary_and_word_embeddings(texts_train, texts_test, nlp)
 
 print('building midi embeddings...')
-num_phrases_by_song_train = [text.count('&') for text in texts_train]
-num_phrases_by_song_test = [text.count('&') for text in texts_test]
-print('train:')
-midi_vectors_train, midi_vectors_sliced_train, slice_indexes_train = get_midi_vectors(
-    midis_train, instrument_indexes, num_phrases_by_song_train)
-print('test:')
-midi_vectors_test, midi_vectors_sliced_test, slice_indexes_test = get_midi_vectors(
-    midis_test, instrument_indexes, num_phrases_by_song_test, init_slice_index=slice_indexes_train[-1][-1] + 1)
-midi_embeddings = np.concatenate([midi_vectors_train, midi_vectors_test])
-midi_sliced_embeddings = np.concatenate([midi_vectors_sliced_train, midi_vectors_sliced_test])
+midi_embeddings, midi_sliced_embeddings, slice_indexes_train, slice_indexes_test = get_midi_embeddings()
 
 val_split = 0.2
 complex_mode = True
 
-train_len = len(midis_train)
+train_len = len(texts_train)
 midi_indexes_train = list(range(train_len))
-midi_indexes_test = list(range(train_len, train_len + len(midi_vectors_test)))
+midi_indexes_test = list(range(train_len, train_len + len(texts_test)))
 val_len = int(len(texts_train) * val_split)
 print('building train set...')
 x_train, y_train = get_set(texts_train[:-val_len], midi_indexes_train[:-val_len], slice_indexes_train[:-val_len],
@@ -361,7 +407,7 @@ dense_lens = [1024]
 epochs = 10
 batch_size = 256
 
-model = build_model(word_embeddings, len(midi_vectors_train[0]), lstm_lens, dense_lens, complex_mode)
+model = build_model(word_embeddings, midi_embeddings, lstm_lens, dense_lens, complex_mode, midi_sliced_embeddings)
 model.summary()
 checkpoint = ModelCheckpoint('checkpoint.h5', save_best_only=True)
 history = model.fit(x_train, y_train, batch_size, epochs, callbacks=[checkpoint], validation_data=(x_val, y_val))
