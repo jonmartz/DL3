@@ -348,8 +348,8 @@ print('test:')
 midis_test, texts_test = get_midis_and_texts(instances_test, dataset_dir, instrument_indexes, 'test')
 
 print('building word embeddings...')
-# nlp = spacy.load('en_core_web_md')  # 300 dim embeddings
-nlp = spacy.load('en_core_web_sm')  # smaller embeddingscache_dir
+nlp = spacy.load('en_core_web_md')  # 300 dim embeddings
+# nlp = spacy.load('en_core_web_sm')  # smaller embeddingscache_dir
 word_indexes, word_embeddings, vocabulary = get_vocabulary_and_word_embeddings(texts_train, texts_test, nlp)
 
 print('building midi embeddings...')
@@ -401,7 +401,6 @@ x_test, y_test = get_set(texts_test, midi_indexes_test, slice_indexes_test, word
 #     write_to_file(history.history, generated_texts, layer_sizes, iteration + 1)
 
 # build model
-
 lstm_lens = [128]
 dense_lens = [1024]
 epochs = 10
