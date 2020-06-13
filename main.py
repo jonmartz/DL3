@@ -14,7 +14,7 @@ import json
 
 # from keras.initializers import Constant
 # from keras.layers import LSTM, Dense, concatenate, Input, Embedding
-# from keras.models import Model
+# from keras.models import Model, load_model
 # from keras.losses import CategoricalCrossentropy
 # from keras.callbacks import ModelCheckpoint
 
@@ -385,6 +385,7 @@ model = build_model(word_embeddings, midi_embeddings, lstm_lens, dense_lens, com
 model.summary()
 checkpoint = ModelCheckpoint('checkpoint.h5', save_best_only=True)
 history = model.fit(x_train, y_train, batch_size, epochs, callbacks=[checkpoint], validation_data=(x_val, y_val))
+model = load_model('model2_checkpoint.h5')
 
 # generate text for all the 5 test melodies, 3 times
 for iteration in range(3):
