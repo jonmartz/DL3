@@ -6,6 +6,7 @@ import spacy
 import pretty_midi
 import json
 
+
 # import tensorflow as tf
 # from tensorflow.keras import Sequential
 # from tensorflow.keras import layers
@@ -196,139 +197,142 @@ def get_note_matrix(midi, midi_end_time, instrument_indexes):
     return note_matrix
 
 
-def get_set(texts, midi_indexes, slices_indexes, word_indexes, nlp, complex_mode):
-    x_words, x_midis, y = [], [], []
-    if complex_mode:
-        x_midis_sliced = []
+def get_set(texts, midi_indexes, slices_indexes, word_indexes, nlp):
+    x_words, x_midis, x_midis_sliced, y = [], [], [], []
     for i in range(len(texts)):
         text, midi_index = texts[i], midi_indexes[i]
         words = [token.text for token in nlp(text.strip())]
         text_word_indexes = [word_indexes[word] for word in words]  # indexes of words in this text
         x_words.extend(text_word_indexes[:-1])  # shape (len(text)-1 = num of "words in text except the last one")
         x_midis.extend([midi_index] * (len(text_word_indexes) - 1))  # shape (len(text)-1, len(midi_vector))
-        y_text = [[0] * len(word_indexes) for _ in range(len(text_word_indexes) - 1)]  # shape (len(text)-1, len(vocab))
-        for j, word_index in enumerate(text_word_indexes[1:]):
-            y_text[j][word_index] = 1  # set the target one hot vectors
-        y.extend(y_text)
-        if complex_mode:
-            x_midis_sliced.extend(get_x_midi_sliced(words[:-1], slices_indexes[i]))
-    if complex_mode:
-        return [np.array(x_words), np.array(x_midis), np.array(x_midis_sliced)], np.array(y)
-    else:
-        return [np.array(x_words), np.array(x_midis)], np.array(y)
+        x_midis_sliced.extend(get_x_midi_sliced(words[:-1], slices_indexes[i]))
+        y.extend(text_word_indexes[1:])
+    return [np.array(x_words), np.array(x_midis), np.array(x_midis_sliced)], np.array(y)
 
 
 def get_x_midi_sliced(words, slice_indexes):
     x_midi_sliced = []
     midi_slice_idx = 0
     for word in words:
-        try:
-            x_midi_sliced.append(slice_indexes[midi_slice_idx])
-        except:
-            print('oops')
+        x_midi_sliced.append(slice_indexes[midi_slice_idx])
         if word == '&':  # end of phrase
             midi_slice_idx += 1
     return x_midi_sliced
 
 
-def build_model(word_embeddings, midi_vector_len, lstm_lens, dense_lens, complex_mode=False, slice_embeddings=None):
-    vocab_len = word_embeddings.shape[0]
-    embedding_len = word_embeddings.shape[1]
-    word_in = Input(shape=(1,))
-    midi_in = Input(shape=(midi_vector_len,))
-    # to start the lstm layer loop
-    lstm = Embedding(word_embeddings.shape[0], embedding_len, trainable=False, weights=[word_embeddings], input_length=1)(word_in)
+def build_model(word_embeddings, midi_embeddings, lstm_lens, dense_lens, complex_mode=False, slice_embeddings=None):
+    # word component
+    word_in = Input(shape=(1,), name='word_in')
+    lstm_word = Embedding(word_embeddings.shape[0], word_embeddings.shape[1],
+                          trainable=False, weights=[word_embeddings], input_length=1)(word_in)
     for lstm_len in lstm_lens:
-        lstm = LSTM(lstm_len)(lstm)
-    # to start the dense layer loop
-    dense = concatenate([lstm, midi_in])
+        lstm_word = LSTM(lstm_len)(lstm_word)
+    # midi component
+    midi_in = Input(shape=(1,), name='midi_in')
+    midi_embedding = Embedding(midi_embeddings.shape[0], midi_embeddings.shape[1],
+                        trainable=False, weights=[midi_embeddings], input_length=1)(midi_in)
+    midi_embedding = Reshape(tuple([midi_embedding.shape[2]]))(midi_embedding)
+    # concatenation
+    if complex_mode:
+        # midi slice component
+        slice_in = Input(shape=(1,), name='slice_in')
+        lstm_slice = Embedding(slice_embeddings.shape[0], slice_embeddings.shape[1],
+                               trainable=False, weights=[slice_embeddings], input_length=1)(slice_in)
+        for lstm_len in lstm_lens:
+            lstm_slice = LSTM(lstm_len)(lstm_slice)
+        dense = concatenate([lstm_word, midi_embedding, lstm_slice])
+    else:
+        dense = concatenate([lstm_word, midi_embedding])
+    # dense layers
     for dense_len in dense_lens:
         dense = Dense(dense_len)(dense)
-    output = Dense(vocab_len, activation='softmax')(dense)
-    model = Model([word_in, midi_in], output)
-    model.compile('adam', CategoricalCrossentropy(), metrics=['acc'])
+    output = Dense(word_embeddings.shape[0], activation='softmax')(dense)
+    if complex_mode:
+        model = Model([word_in, midi_in, slice_in], output, name='complex')
+    else:
+        model = Model([word_in, midi_in], output, name='simple')
+    model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['acc'])
     return model
 
 
-# def get_train_and_val_data(x_train, y_train, val_split):
-#     val_len = int(len(x_train) * val_split)
-#     x_train_tensors = tuple((tf.constant(i) for i in x_train[:-val_len]))
-#     y_train_tensors = tuple((tf.constant(i) for i in y_train[:-val_len]))
-#     x_val_tensors = tuple((tf.constant(i) for i in x_train[-val_len:]))
-#     y_val_tensors = tuple((tf.constant(i) for i in y_train[-val_len:]))
-#     train_data = tf.data.Dataset.from_tensors((x_train_tensors, y_train_tensors))
-#     val_data = tf.data.Dataset.from_tensors((x_val_tensors, y_val_tensors))
-#     return train_data, val_data
-#
-#
-# def build_model(vocabulary_size, word_embeddings, layer_sizes, midi_vector_size):
-#     model = Sequential(name='RNN')
-#     model.add(layers.Embedding(vocabulary_size, word_embeddings.shape[1], trainable=False,
-#                                embeddings_initializer=Constant(word_embeddings)))
-#     for layer_size in layer_sizes:
-#         model.add(layers.LSTM(layer_size, return_sequences=True))
-#     model.add(layers.Dense(vocabulary_size))
-#     model.compile(optimizer='adam', loss=loss)
-#     return model
-#
-#
-# def loss(labels, logits):
-#     return tf.keras.losses.sparse_categorical_crossentropy(labels, logits, from_logits=True)
-#
-#
-# def get_checkpoints_callback(checkpoint_dir):
-#     filepath_prefix = os.path.join(checkpoint_dir, "ckpt_{epoch}")
-#     return tf.keras.callbacks.ModelCheckpoint(filepath=filepath_prefix, monitor='val_loss', save_weights_only=True)
+def generate_text(model, input_word, word_indexes, vocabulary, text_len, midi, temperature=1.0):
+    # current_word_index = tf.expand_dims([word_indexes[input_word]], 0)
+    current_word_index = word_indexes[input_word]
+    text_generated = []
+    model.reset_states()
+    for i in range(text_len):
+        # predicted_words = tf.squeeze(model.predict([[current_word_index], [midi]]), 0) / temperature  # remove the batch dimension
+        predicted_words = model.predict([[current_word_index], [midi]])
+        # use a categorical distribution to predict the next word
+        predicted_id = tf.random.categorical(predicted_words, num_samples=1)[-1, 0].numpy()
+        text_generated.append(vocabulary[predicted_id])
+        # print(text_generated[-1])
+        current_word_index = predicted_id
+    return '%s %s' % (input_word, ' '.join(text_generated))
 
 
-# def generate_text(model, input_word, word_indexes, vocabulary, output_text_len, midi, temperature=1.0):
-#     # current_word_index = tf.expand_dims([word_indexes[input_word]], 0)
-#     current_word_index = word_indexes[input_word]
-#     text_generated = []
-#     model.reset_states()
-#     for i in range(output_text_len):
-#         # predicted_words = tf.squeeze(model(current_word_index, midi), 0) / temperature  # remove the batch dimension
-#         predicted_words = tf.squeeze(model.predict([[current_word_index], [midi]]), 0) / temperature
-#         # use a categorical distribution to predict the next word
-#         predicted_id = tf.random.categorical(predicted_words, num_samples=1)[-1, 0].numpy()
-#         text_generated.append(vocabulary[predicted_id])
-#         current_word_index = tf.expand_dims([predicted_id], 0)
-#     return '%s %s' % (input_word, ' '.join(text_generated))
+def generate_texts(model, x_test, vocabulary):
+    mode = model.name
+    generated_texts = []
+    prev_midi_idx = -1
+    for i in range(len(x_test[0])):
+        curr_midi_idx = x_test[1][i]
+        if mode == 'complex':
+            midi_slice_idx = x_test[2][i]
+        if prev_midi_idx != curr_midi_idx:  # got to next song
+            prev_midi_idx = curr_midi_idx
+            if i != 0:  # save text generated from last song
+                generated_texts.append(' '.join(generated_text))
+            print('test song %d' % (len(generated_texts) + 1))
+            first_word_idx = x_test[0][i]  # take first word
+            word_idx = first_word_idx
+            generated_text = [vocabulary[word_idx]]
+            model.reset_states()
+        if mode == 'no midi':
+            pred_word_idxs = model.predict([[word_idx]])
+        elif mode == 'simple':
+            pred_word_idxs = model.predict([[word_idx], [curr_midi_idx]])
+        else:
+            pred_word_idxs = model.predict([[word_idx], [curr_midi_idx], [midi_slice_idx]])
+        word_idx = tf.random.categorical(pred_word_idxs, num_samples=1)[-1, 0].numpy()
+        generated_text.append(vocabulary[word_idx])
+    generated_texts.append(' '.join(generated_text))  # append last generated text
+    return generated_texts
 
 
-# def write_to_file(history, generated_texts, layer_sizes, iteration):
-#     layers_str = '_'.join([str(i) for i in layer_sizes])
-#     dir_name = 'drive/My Drive/Colab results/lyric generator results/layers_%s' % layers_str
-#     if not os.path.exists(dir_name):
-#         os.makedirs(dir_name)
-#     to_file = []
-#     header = "epoch"
-#     scores = []
-#     epoch = 0
-#     for key in history:
-#         header = "%s,%s" % (header, key)
-#         scores.append(history[key])
-#
-#     to_file.append(header)
-#     for i in range(len(scores[0])):
-#         epoch += 1
-#         line = "%d" % epoch
-#         for j in range(len(scores)):
-#             line = "%s,%s" % (line, scores[j][i])
-#         to_file.append(line)
-#
-#     with open('%s/train_results.csv' % dir_name, 'w') as file:
-#         for line in to_file:
-#             file.write("%s\n" % line)
-#
-#     with open('%s/test_results_%d.csv' % (dir_name, iteration), 'w') as file:
-#         for line in generated_texts:
-#             file.write("%s\n" % line)
+def write_to_file(history, generated_texts, layer_sizes, iteration, model_name):
+    layers_str = '_'.join([str(i) for i in layer_sizes])
+    dir_name = 'drive/My Drive/Colab results/lyric generator results/layers_%s/%s' % (layers_str, model_name)
+    if not os.path.exists(dir_name):
+        os.makedirs(dir_name)
+    to_file = []
+    header = "epoch"
+    scores = []
+    epoch = 0
+    for key in history:
+        header = "%s,%s" % (header, key)
+        scores.append(history[key])
+
+    to_file.append(header)
+    for i in range(len(scores[0])):
+        epoch += 1
+        line = "%d" % epoch
+        for j in range(len(scores)):
+            line = "%s,%s" % (line, scores[j][i])
+        to_file.append(line)
+
+    with open('%s/train_results.csv' % dir_name, 'w') as file:
+        for line in to_file:
+            file.write("%s\n" % line)
+
+    with open('%s/test_results_%d.csv' % (dir_name, iteration), 'w') as file:
+        for line in generated_texts:
+            file.write("%s\n" % line)
 
 
 # base_dir = 'DL3/'  # for colab
 base_dir = ''
-train_subset = 0  # for speeding up debugging. select 0 for whole train set
+train_subset = 5  # for speeding up debugging. select 0 for whole train set
 
 dataset_dir = '%sdataset' % base_dir
 cache_dir = '%scaches/%d' % (base_dir, train_subset)
@@ -348,8 +352,8 @@ print('test:')
 midis_test, texts_test = get_midis_and_texts(instances_test, dataset_dir, instrument_indexes, 'test')
 
 print('building word embeddings...')
-nlp = spacy.load('en_core_web_md')  # 300 dim embeddings
-# nlp = spacy.load('en_core_web_sm')  # smaller embeddingscache_dir
+# nlp = spacy.load('en_core_web_md')  # 300 dim embeddings
+nlp = spacy.load('en_core_web_sm')  # smaller embeddingscache_dir
 word_indexes, word_embeddings, vocabulary = get_vocabulary_and_word_embeddings(texts_train, texts_test, nlp)
 
 print('building midi embeddings...')
@@ -371,35 +375,6 @@ x_val, y_val = get_set(texts_train[-val_len:], midi_indexes_train[-val_len:], sl
 print('building test set...')
 x_test, y_test = get_set(texts_test, midi_indexes_test, slice_indexes_test, word_indexes, nlp, complex_mode)
 
-# # build model
-# layer_sizes = [128]
-# model = build_model(len(vocabulary), word_embeddings, layer_sizes, len(midi_vectors_train[0]))
-# model.summary()
-# checkpoint_dir = './training_checkpoints'
-# checkpoint_callback = get_checkpoints_callback(checkpoint_dir)
-#
-# print('training model...')
-# history = model.fit(train_data, epochs=10, validation_data=val_data, callbacks=[checkpoint_callback])
-#
-# # get best checkpoint
-# tf.train.latest_checkpoint(checkpoint_dir)
-# model.load_weights(tf.train.latest_checkpoint(checkpoint_dir))
-# model.build(tf.TensorShape([1, None]))
-#
-# # generate text for all the 5 test melodies, 3 times
-# for iteration in range(3):
-#     generated_texts = []
-#     for i, text in enumerate(x_test):
-#         print('\ntarget text %d:' % i)
-#         print(' '.join(vocabulary[text]))
-#
-#         generated_text = generate_text(model, vocabulary[text[0]], word_indexes, vocabulary, text_len=len(text))
-#         print('generated text %d:' % i)
-#         print(generated_text)
-#
-#         generated_texts.append(generated_text)
-#     write_to_file(history.history, generated_texts, layer_sizes, iteration + 1)
-
 # build model
 lstm_lens = [128]
 dense_lens = [1024]
@@ -413,18 +388,8 @@ history = model.fit(x_train, y_train, batch_size, epochs, callbacks=[checkpoint]
 
 # generate text for all the 5 test melodies, 3 times
 for iteration in range(3):
-    generated_texts = []
-    i = 0
-    for text, midi in zip(texts_test, midi_vectors_test):
-        text = text.strip()
-        tokens = nlp(text)
-        generated_text = generate_text(model, tokens[0].text, word_indexes, vocabulary, len(text), midi)
-        print('\ntarget text %d:' % i)
-        print(text)
-        print('generated text %d:' % i)
-        print(generated_text)
-        generated_texts.append(generated_text)
-        i += 1
-    write_to_file(history.history, generated_texts, lstm_lens, iteration + 1)
+    print('iteration %d/3' % (iteration + 1))
+    generated_texts = generate_texts(model, x_test, vocabulary)
+    write_to_file(history.history, generated_texts, lstm_lens, iteration + 1, model.name)
 
 print('done')
