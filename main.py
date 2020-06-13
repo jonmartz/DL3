@@ -332,7 +332,7 @@ def write_to_file(history, generated_texts, layer_sizes, iteration, model_name):
 
 # base_dir = 'DL3/'  # for colab
 base_dir = ''
-train_subset = 5  # for speeding up debugging. select 0 for whole train set
+train_subset = 0  # for speeding up debugging. select 0 for whole train set
 
 dataset_dir = '%sdataset' % base_dir
 cache_dir = '%scaches/%d' % (base_dir, train_subset)
@@ -352,45 +352,45 @@ print('test:')
 midis_test, texts_test = get_midis_and_texts(instances_test, dataset_dir, instrument_indexes, 'test')
 
 print('building word embeddings...')
-# nlp = spacy.load('en_core_web_md')  # 300 dim embeddings
-nlp = spacy.load('en_core_web_sm')  # smaller embeddingscache_dir
+nlp = spacy.load('en_core_web_md')  # 300 dim embeddings
+# nlp = spacy.load('en_core_web_sm')  # smaller embeddings
 word_indexes, word_embeddings, vocabulary = get_vocabulary_and_word_embeddings(texts_train, texts_test, nlp)
 
 print('building midi embeddings...')
 midi_embeddings, midi_sliced_embeddings, slice_indexes_train, slice_indexes_test = get_midi_embeddings()
 
-val_split = 0.2
-complex_mode = True
-
-train_len = len(texts_train)
-midi_indexes_train = list(range(train_len))
-midi_indexes_test = list(range(train_len, train_len + len(texts_test)))
-val_len = int(len(texts_train) * val_split)
-print('building train set...')
-x_train, y_train = get_set(texts_train[:-val_len], midi_indexes_train[:-val_len], slice_indexes_train[:-val_len],
-                           word_indexes, nlp, complex_mode)
-print('building validation set...')
-x_val, y_val = get_set(texts_train[-val_len:], midi_indexes_train[-val_len:], slice_indexes_train[-val_len:],
-                       word_indexes, nlp, complex_mode)
-print('building test set...')
-x_test, y_test = get_set(texts_test, midi_indexes_test, slice_indexes_test, word_indexes, nlp, complex_mode)
-
-# build model
-lstm_lens = [128]
-dense_lens = [1024]
-epochs = 10
-batch_size = 256
-
-model = build_model(word_embeddings, midi_embeddings, lstm_lens, dense_lens, complex_mode, midi_sliced_embeddings)
-model.summary()
-checkpoint = ModelCheckpoint('checkpoint.h5', save_best_only=True)
-history = model.fit(x_train, y_train, batch_size, epochs, callbacks=[checkpoint], validation_data=(x_val, y_val))
-model = load_model('model2_checkpoint.h5')
-
-# generate text for all the 5 test melodies, 3 times
-for iteration in range(3):
-    print('iteration %d/3' % (iteration + 1))
-    generated_texts = generate_texts(model, x_test, vocabulary)
-    write_to_file(history.history, generated_texts, lstm_lens, iteration + 1, model.name)
-
-print('done')
+# val_split = 0.2
+# complex_mode = True
+#
+# train_len = len(texts_train)
+# midi_indexes_train = list(range(train_len))
+# midi_indexes_test = list(range(train_len, train_len + len(texts_test)))
+# val_len = int(len(texts_train) * val_split)
+# print('building train set...')
+# x_train, y_train = get_set(texts_train[:-val_len], midi_indexes_train[:-val_len], slice_indexes_train[:-val_len],
+#                            word_indexes, nlp, complex_mode)
+# print('building validation set...')
+# x_val, y_val = get_set(texts_train[-val_len:], midi_indexes_train[-val_len:], slice_indexes_train[-val_len:],
+#                        word_indexes, nlp, complex_mode)
+# print('building test set...')
+# x_test, y_test = get_set(texts_test, midi_indexes_test, slice_indexes_test, word_indexes, nlp, complex_mode)
+#
+# # build model
+# lstm_lens = [128]
+# dense_lens = [1024]
+# epochs = 10
+# batch_size = 256
+#
+# model = build_model(word_embeddings, midi_embeddings, lstm_lens, dense_lens, complex_mode, midi_sliced_embeddings)
+# model.summary()
+# checkpoint = ModelCheckpoint('checkpoint.h5', save_best_only=True)
+# history = model.fit(x_train, y_train, batch_size, epochs, callbacks=[checkpoint], validation_data=(x_val, y_val))
+# model = load_model('model2_checkpoint.h5')
+#
+# # generate text for all the 5 test melodies, 3 times
+# for iteration in range(3):
+#     print('iteration %d/3' % (iteration + 1))
+#     generated_texts = generate_texts(model, x_test, vocabulary)
+#     write_to_file(history.history, generated_texts, lstm_lens, iteration + 1, model.name)
+#
+# print('done')
